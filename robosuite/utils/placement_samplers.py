@@ -187,7 +187,7 @@ class UniformRandomSampler(ObjectPositionSampler):
         Samples the orientation for a given object
 
         Returns:
-            np.array: sampled object quaternion in (w,x,y,z) form
+            np.array: sampled (r,p,y) euler angle orientation
 
         Raises:
             ValueError: [Invalid rotation axis]

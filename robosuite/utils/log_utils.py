@@ -3,8 +3,6 @@ This file contains utility classes and functions for logging to stdout and stder
 Adapted from robomimic: https://github.com/ARISE-Initiative/robomimic/blob/master/robomimic/utils/log_utils.py
 """
 import logging
-import os
-import time
 
 from termcolor import colored
 
@@ -70,10 +68,7 @@ class DefaultLogger:
         logger = logging.getLogger(self.logger_name)
 
         if file_logging_level is not None:
-            time_str = str(time.time()).replace(".", "_")
-            log_file_path = "/tmp/robosuite_{}_{}.log".format(time_str, os.getpid())
-            fh = logging.FileHandler(log_file_path)
-            print(colored("[robosuite]: Saving logs to {}".format(log_file_path), "yellow"))
+            fh = logging.FileHandler("/tmp/robosuite.log")
             fh.setLevel(logging.getLevelName(file_logging_level))
             file_formatter = FileFormatter()
             fh.setFormatter(file_formatter)

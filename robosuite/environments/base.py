@@ -6,7 +6,7 @@ import numpy as np
 
 import robosuite
 import robosuite.macros as macros
-import robosuite.utils.sim_utils as SU
+#import robosuite.utils.sim_utils as SU
 from robosuite.renderers.base import load_renderer_config
 from robosuite.utils import OpenCVRenderer, SimulationError, XMLError
 from robosuite.utils.binding_utils import MjRenderContextOffscreen, MjSim

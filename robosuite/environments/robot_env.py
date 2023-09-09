@@ -10,6 +10,7 @@ from robosuite.robots import ROBOT_CLASS_MAPPING
 from robosuite.utils.mjcf_utils import IMAGE_CONVENTION_MAPPING
 from robosuite.utils.observables import Observable, sensor
 
+from robosuite.controllers.skill_controller import SkillController
 
 class RobotEnv(MujocoEnv):
     """
@@ -142,6 +143,11 @@ class RobotEnv(MujocoEnv):
         robot_configs=None,
         renderer="mujoco",
         renderer_config=None,
+        #skill_config=None,
+        #new
+        skill_config_peg = None,
+        skill_config_hole = None,
+
     ):
         # First, verify that correct number of robots are being inputted
         self.env_configuration = env_configuration
@@ -165,6 +171,9 @@ class RobotEnv(MujocoEnv):
 
         # Observations -- Ground truth = object_obs, Image data = camera_obs
         self.use_camera_obs = use_camera_obs
+
+        self.skill_controller_peg = SkillController(self, skill_config_peg)
+        self.skill_controller_hole = SkillController(self, skill_config_hole)
 
         # Camera / Rendering Settings
         self.has_offscreen_renderer = has_offscreen_renderer
@@ -195,6 +204,7 @@ class RobotEnv(MujocoEnv):
             raise ValueError("Must specify at least one camera name when using camera obs")
 
         # Robot configurations -- update from subclass configs
+        # Robot configurations -- update from subclass configs
         if robot_configs is None:
             robot_configs = [{} for _ in range(self.num_robots)]
         self.robot_configs = [
@@ -204,6 +214,8 @@ class RobotEnv(MujocoEnv):
                     "mount_type": mount_types[idx],
                     "initialization_noise": initialization_noise[idx],
                     "control_freq": control_freq,
+                    "skill_controller_peg": self.skill_controller_peg,
+                    "skill_controller_hole": self.skill_controller_hole,
                 },
                 **robot_config,
             )
@@ -265,10 +277,23 @@ class RobotEnv(MujocoEnv):
                 - (np.array) maximum (high) action values
         """
         low, high = [], []
+
+        skill_dim = self.skill_controller_peg.get_skill_dim() + self.skill_controller_hole.get_skill_dim()
+
         for robot in self.robots:
-            lo, hi = robot.action_limits
+            # lo, hi = robot.action_limits
+            param_dim = self.skill_controller_peg.get_param_dim(robot.action_dim)
+            robot_dim = param_dim + skill_dim
+            lo, hi = (-1 * np.ones(robot_dim), np.ones(robot_dim))
             low, high = np.concatenate([low, lo]), np.concatenate([high, hi])
+
         return low, high
+    
+
+    @property
+    def action_skill_dim(self):
+        #new
+        return self.skill_controller_peg.get_skill_dim() + self.skill_controller_hole.get_skill_dim()
 
     @property
     def action_dim(self):
@@ -555,33 +580,7 @@ class RobotEnv(MujocoEnv):
             # Lastly, replace camera names with the updated ones
             self.camera_names = temp_names
 
-    def _pre_action(self, action, policy_step=False):
-        """
-        Overrides the superclass method to control the robot(s) within this enviornment using their respective
-        controllers using the passed actions and gripper control.
 
-        Args:
-            action (np.array): The control to apply to the robot(s). Note that this should be a flat 1D array that
-                encompasses all actions to be distributed to each robot if there are multiple. For each section of the
-                action space assigned to a single robot, the first @self.robots[i].controller.control_dim dimensions
-                should be the desired controller actions and if the robot has a gripper, the next
-                @self.robots[i].gripper.dof dimensions should be actuation controls for the gripper.
-            policy_step (bool): Whether a new policy step (action) is being taken
-
-        Raises:
-            AssertionError: [Invalid action dimension]
-        """
-        # Verify that the action is the correct dimension
-        assert len(action) == self.action_dim, "environment got invalid action dimension -- expected {}, got {}".format(
-            self.action_dim, len(action)
-        )
-
-        # Update robot joints based on controller actions
-        cutoff = 0
-        for idx, robot in enumerate(self.robots):
-            robot_action = action[cutoff : cutoff + robot.action_dim]
-            robot.control(robot_action, policy_step=policy_step)
-            cutoff += robot.action_dim
 
     def _load_robots(self):
         """
@@ -615,3 +614,98 @@ class RobotEnv(MujocoEnv):
             robots (str or list of str): Inputted requested robots at the task-level environment
         """
         raise NotImplementedError
+    
+    def step(self, action_peg, action_hole, image_obs_in_info=False, **kwargs):
+        sc_peg = self.skill_controller_peg
+        sc_hole = self.skill_controller_hole
+        sc_peg.reset(action_peg, 0)
+        sc_hole.reset(action_hole, 1)
+        image_obs = []
+        reward_sum = 0
+        while True:
+            action_ll1 = sc_peg.step(0)
+            action_ll2 = sc_hole.step(1)
+            action_ll = np.concatenate((action_ll1, action_ll2))
+            _, reward, done, info = super().step(action_ll, **kwargs)
+            reward_sum += reward
+            if image_obs_in_info:
+                image_obs.append(self._get_camera_obs()['agentview_image'])
+
+            if sc_peg.done(0) and sc_hole.done(1):
+                break
+
+        info['reward_actions'] = reward_sum
+        info['reward_skills'] = reward
+
+        reward1 = sc_peg.post_process_reward(reward, 0)
+        reward2 = sc_hole.post_process_reward(reward, 1)
+
+        if image_obs_in_info:
+            info['image_obs'] = image_obs
+        info['num_ac_calls'] = (sc_peg.get_num_ac_calls() + sc_hole.get_num_ac_calls()) / 2
+        info['skill_complete'] = float(sc_peg.is_success(0)) + float(sc_hole.is_success(1))
+        info['aff_reward'] = (sc_peg.get_aff_reward() + sc_hole.get_aff_reward()) / 2
+        info['aff_success'] = float(sc_peg.get_aff_success()) +  float(sc_hole.get_aff_success()) 
+        info.update(self._get_env_info(action_ll))
+
+        return self._get_observations(), (reward1 + reward2) / 2, done, info
+    
+
+
+    def _get_env_info(self, action):
+        assert len(action) == self._action_dim
+        info = {}
+        return info
+    
+    def _pre_action(self, action, policy_step=False):
+        """
+        Overrides the superclass method to control the robot(s) within this enviornment using their respective
+        controllers using the passed actions and gripper control.
+
+        Args:
+            action (np.array): The control to apply to the robot(s). Note that this should be a flat 1D array that
+                encompasses all actions to be distributed to each robot if there are multiple. For each section of the
+                action space assigned to a single robot, the first @self.robots[i].controller.control_dim dimensions
+                should be the desired controller actions and if the robot has a gripper, the next
+                @self.robots[i].gripper.dof dimensions should be actuation controls for the gripper.
+            policy_step (bool): Whether a new policy step (action) is being taken
+
+        Raises:
+            AssertionError: [Invalid action dimension]
+        """
+        # Verify that the action is the correct dimension
+        robot_dim = sum([robot.action_dim for robot in self.robots])
+        assert len(action) == robot_dim, \
+            "environment got invalid action dimension -- expected {}, got {}".format(
+                robot_dim, len(action))
+
+        # Update robot joints based on controller actions
+        cutoff = 0
+        for idx, robot in enumerate(self.robots):
+            robot_action = action[cutoff:cutoff+robot.action_dim]
+            robot.control(robot_action, policy_step=policy_step)
+            cutoff += robot.action_dim
+
+    def _reset_skill(self):
+        pass
+
+    def _get_skill_info(self):
+        return {}
+    
+    def _get_camera_obs(self):
+        di = OrderedDict()
+        for (cam_name, cam_w, cam_h, cam_d) in \
+                zip(self.camera_names, self.camera_widths, self.camera_heights, self.camera_depths):
+
+            # Add camera observations to the dict
+            camera_obs = self.sim.render(
+                camera_name=cam_name,
+                width=cam_w,
+                height=cam_h,
+                depth=cam_d,
+            )
+            if cam_d:
+                di[cam_name + "_image"], di[cam_name + "_depth"] = camera_obs
+            else:
+                di[cam_name + "_image"] = camera_obs
+        return di
