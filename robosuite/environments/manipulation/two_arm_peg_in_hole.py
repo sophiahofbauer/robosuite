@@ -8,6 +8,35 @@ from robosuite.models.tasks import ManipulationTask
 from robosuite.utils.mjcf_utils import CustomMaterial, array_to_string, find_elements
 from robosuite.utils.observables import Observable, sensor
 
+#NEW --> we have to change that
+DEFAULT_TWO_ARM_PEG_IN_HOLE_CONFIG = {
+    'large_hole': False,
+    'd_weight': 1,
+    't_weight': 5,
+    'cos_weight': 1,
+    'scale_by_cos': True,
+    'scale_by_d': True,
+    'cos_tanh_mult': 3.0,
+    'd_tanh_mult': 15.0,
+    't_tanh_mult': 7.5,
+    'limit_init_ori': True,
+    'lift_pos_offset': 0.3,
+}
+ENV_HORIZON      = 250
+ACTION_LIM       = 30
+ACTION_DIM       = 12
+AGENT_HORIZON    = int(ENV_HORIZON / (ACTION_LIM / 2))  # This is necessarily an approximation
+NUM_VEC_ENVS     = 4 #changed here
+PRIMITIVE        = 't'
+QUAT_ANGLES_PEG  = np.array([0.5, 0.5, 0.5, -0.5])
+QUAT_ANGLES_HOLE = np.array([0, -0.7071, 0.7071])
+BBOX_PEG         = np.array([[-0.2, +0.2], [-0.4, -0.2], [+1.5, +1.9]])
+BBOX_HOLE        = np.array([[-0.2, +0.2], [+0.2, +0.4], [+1.3, +1.7]])
+MIN_BBOX_PEG     = BBOX_PEG[:, 0]
+MAX_BBOX_PEG     = BBOX_PEG[:, 1]
+MIN_BBOX_HOLE    = BBOX_HOLE[:, 0]
+MAX_BBOX_HOLE    = BBOX_HOLE[:, 1]
+
 
 class TwoArmPegInHole(TwoArmEnv):
     """
@@ -145,6 +174,10 @@ class TwoArmPegInHole(TwoArmEnv):
         controller_configs=None,
         gripper_types=None,
         initialization_noise="default",
+        #this is adapted from lift, we have to fix it for two arms
+        table_full_size=(0.8, 0.8, 0.05),
+        table_friction=(1., 5e-3, 1e-4),
+        table_offset=(0, 0, 0.8),
         use_camera_obs=True,
         use_object_obs=True,
         reward_scale=1.0,
@@ -165,9 +198,14 @@ class TwoArmPegInHole(TwoArmEnv):
         camera_heights=256,
         camera_widths=256,
         camera_depths=False,
-        camera_segmentations=None,  # {None, instance, class, element}
+        #camera_segmentations=None,  # {None, instance, class, element}
         renderer="mujoco",
-        renderer_config=None,
+        #renderer_config=None,
+        #New
+        task_config=None,
+        #skill_config=None,
+        skill_config_peg=None,
+        skill_config_hole=None,
     ):
         # Assert that the gripper type is None
         assert gripper_types is None, "Tried to specify gripper other than None in TwoArmPegInHole environment!"
@@ -182,6 +220,12 @@ class TwoArmPegInHole(TwoArmEnv):
         # Save peg specs
         self.peg_radius = peg_radius
         self.peg_length = peg_length
+
+        #New
+        # Get config
+        self.task_config = DEFAULT_TWO_ARM_PEG_IN_HOLE_CONFIG.copy()
+        if task_config is not None:
+            self.task_config.update(task_config)
 
         super().__init__(
             robots=robots,
@@ -205,11 +249,15 @@ class TwoArmPegInHole(TwoArmEnv):
             camera_heights=camera_heights,
             camera_widths=camera_widths,
             camera_depths=camera_depths,
-            camera_segmentations=camera_segmentations,
-            renderer=renderer,
-            renderer_config=renderer_config,
+            #camera_segmentations=camera_segmentations,
+            #renderer=renderer,
+            #renderer_config=renderer_config,
+            #skill_config=skill_config,
+            skill_config_peg=skill_config_peg,
+            skill_config_hole = skill_config_hole,
         )
 
+    '''
     def reward(self, action=None):
         """
         Reward function for the task.
@@ -261,11 +309,196 @@ class TwoArmPegInHole(TwoArmEnv):
             reward *= self.reward_scale / 5.0
 
         return reward
+    '''
+
+    #New
+    def _calculate_angle_magnitude(self, position, quat_angles, min_bbox, max_bbox):
+        """Calculate angle magnitude based on position"""
+        if np.all(min_bbox <= position) and np.all(position <= max_bbox):
+            return np.linalg.norm(quat_angles - position[:3]) / len(quat_angles)
+        else:
+            return 0.5
+
+    def reward(self, action):
+        #1. stay with this primitives
+        #2. maybe add / exchange some of these primitives
+        reward = 0
+
+        # Right location and angle
+
+        r_align, r_insert, r_reach = self.staged_rewards() #r_grasp, 
+        if self.reward_shaping:
+            reward = max(  r_align, r_reach) #r_grasp, r_reach,
+        else:
+            reward = r_insert
+
+        if self.reward_scale is not None:
+            reward *= self.reward_scale
+
+        return reward
+
+    def staged_rewards(self):
+        reach_mult = 0.10
+        grasp_mult = 0.15
+        align_mult = 0.85
+
+        #r_grasp = 0
+        r_reach = 0 
+        r_align = 0
+        reward = 0
+
+        t, d, cos = self._compute_orientation()
+
+        '''
+        # reaching reward
+        hole_pos = self.sim.data.body_xpos[self.hole_body_id]
+        gripper_site_pos = self.sim.data.body_xpos[self.peg_body_id]
+        dist = np.linalg.norm(gripper_site_pos - hole_pos)
+        #Original one for reach
+        r_reach = 1 - np.tanh(1.0 * dist) #* reach_mult
+        #Maple one for reach
+        #r_reach = (1 - np.tan(10.0 * dist)) #* reach_mult
+        
+        # Orientation reward
+        #one arm peg in hole  reward from maple        
+        d_w = self.task_config['d_weight']
+        t_w = self.task_config['t_weight']
+        cos_w = self.task_config['cos_weight']
+
+        cos_tanh_mult = self.task_config['cos_tanh_mult']
+        d_tanh_mult = self.task_config['d_tanh_mult']
+        t_tanh_mult = self.task_config['t_tanh_mult']
+
+        cos_dist = 1 - (cos + 1) / 2
+        cos_rew = 1 - np.tanh(cos_tanh_mult * cos_dist)
+        d_rew = 1 - np.tanh(d_tanh_mult * d)
+        t_rew = 1 - np.tanh(t_tanh_mult * np.abs(t))
+
+        scale_by_cos = self.task_config['scale_by_cos']
+        scale_by_d = self.task_config['scale_by_d']
+        if scale_by_cos:
+            t_rew *= cos_rew
+        if scale_by_d:
+            t_rew *= d_rew
+        if scale_by_cos:
+            d_rew *= cos_rew
+
+        r_align_sum = (cos_w * cos_rew) + (d_w * d_rew) + (t_w * t_rew)
+        r_align_norm = r_align_sum / float(d_w + t_w + cos_w) # normalize sum to be between 0 and 1
+
+        r_align = r_align_norm * (align_mult)
+        
+
+        
+        
+        #we also have to change this for the two arm problem
+        #we maybe can get inspired from the last years group
+        # Orientation reward from original implementation --> we maybe have to change that
+        r_align += 1 - np.tanh(d)
+        r_align += 1 - np.tanh(np.abs(t))
+        r_align += cos
+        r_align = r_align * align_mult
+        """
+        #align --> last year
+        """Calculate reward for 'align' primitive"""
+        angle_mag_peg = self._calculate_angle_magnitude(gripper_site_pos, QUAT_ANGLES_PEG, MIN_BBOX_PEG, MAX_BBOX_PEG)
+        print(angle_mag_peg)
+        angle_mag_hole = self._calculate_angle_magnitude(hole_pos, QUAT_ANGLES_HOLE, MIN_BBOX_HOLE, MAX_BBOX_HOLE)
+        r_align = 1 - (angle_mag_peg + angle_mag_hole)
+        print(r_align)
+        
+        # Grab relevant values
+        t, d, cos = self._compute_orientation()
+            # reaching reward
+        hole_pos = self.sim.data.body_xpos[self.hole_body_id]
+        gripper_site_pos = self.sim.data.body_xpos[self.peg_body_id]
+        dist = np.linalg.norm(gripper_site_pos - hole_pos)
+        reaching_reward = 1 - np.tanh(1.0 * dist)
+        reward += reaching_reward
+
+            # Orientation reward
+        reward += 1 - np.tanh(d)
+        reward += 1 - np.tanh(np.abs(t))
+        reward += cos
+
+        r_align = reward
+        '''
+        # Grab relevant values
+        t, d, cos = self._compute_orientation()
+            # reaching reward
+        hole_pos = self.sim.data.body_xpos[self.hole_body_id]
+        gripper_site_pos = self.sim.data.body_xpos[self.peg_body_id]
+        dist = np.linalg.norm(gripper_site_pos - hole_pos)
+        reaching_reward = 1 - np.tanh(1.0 * dist)
+        r_reach += reaching_reward * 0.1
+
+        angle_mag_peg = self._calculate_angle_magnitude(gripper_site_pos, QUAT_ANGLES_PEG, MIN_BBOX_PEG, MAX_BBOX_PEG)
+
+        angle_mag_hole = self._calculate_angle_magnitude(hole_pos, QUAT_ANGLES_HOLE, MIN_BBOX_HOLE, MAX_BBOX_HOLE)
+        r_align = 1 - (angle_mag_peg + angle_mag_hole)
+
+            # Orientation reward
+        reward += 1 - np.tanh(d)
+        reward += 1 - np.tanh(np.abs(t))
+        reward += cos
+        #r_align = reward * 0.85
+
+        r_insert = self._check_success()
+        
+        return  r_align, r_insert, r_reach #r_grasp, 
+
+    def _get_env_info(self, action):
+        #we have to do some changes for the two arm problem
+        info = super()._get_env_info(action)
+        r_align, r_insert, r_reach = self.staged_rewards() #r_grasp,   r_reach,
+        t, d, cos = self._compute_orientation()
+        info.update({
+            'r_reach': r_reach,
+            #'r_grasp': r_grasp / 0.15,
+            'r_align': r_align,#/ 0.85,
+            'success': r_insert,
+            'align_t_abs': np.abs(t),
+            'align_d': d,
+            'align_cos': cos,
+        })
+        return info
+    def _get_skill_info(self, robot_num):
+        #we have to do some changes for the two arm problem
+        #peg_tip_pos = self.sim.data.get_site_xpos(self.peg.important_sites["tip"])
+        #hole_pos = np.array(self.sim.data.body_xpos[self.hole_body_id])
+        #lift_pos = hole_pos + [0.0, self.task_config['lift_pos_offset'], 0.0]
+        hole_pos = self.sim.data.body_xpos[self.hole_body_id]
+        
+        peg_pos = self.sim.data.body_xpos[self.peg_body_id]
+        gripper_site_pos = self.sim.data.body_xpos[self.peg_body_id]
+        dist = gripper_site_pos - hole_pos
+        pos_info = {}
+        hole_pos = self.sim.data.body_xpos[self.hole_body_id]
+        hole_mat = self.sim.data.body_xmat[self.hole_body_id]
+        hole_mat.shape = (3, 3)
+        center = hole_pos + hole_mat @ np.array([0.1, 0, 0])
+        info = {}
+        if robot_num == 0:
+        #when peg goal pos is hole pos
+            pos_info['push'] = [center] # push target positions
+            pos_info['reach'] = [center] # reach target positions
+            info['cur_ee_pos'] = peg_pos
+        else:
+        #when hole goal pos is peg pose
+            pos_info['push'] = [peg_pos] # push target positions
+            pos_info['reach'] = [peg_pos] # reach target positions
+            info['cur_ee_pos'] = center
+        
+        for k in pos_info:
+            info[k + '_pos'] = pos_info[k]
+
+        return info
 
     def _load_model(self):
         """
         Loads an xml model, puts it in self.model
         """
+      
         super()._load_model()
 
         # Adjust base pose(s) accordingly
@@ -358,6 +591,7 @@ class TwoArmPegInHole(TwoArmEnv):
         # Make sure to add relevant assets from peg and hole objects
         self.model.merge_assets(self.hole)
         self.model.merge_assets(self.peg)
+        print(self.model)
 
     def _setup_references(self):
         """
@@ -455,8 +689,8 @@ class TwoArmPegInHole(TwoArmEnv):
             bool: True if peg is placed in hole correctly
         """
         t, d, cos = self._compute_orientation()
-
-        return d < 0.06 and -0.12 <= t <= 0.14 and cos > 0.95
+ 
+        return  d < 0.08 and -0.12 <= t <= 0.14 and cos > 0.65 # d < 0.08 and -0.12 <= t <= 0.14 and cos > 0.95
 
     def _compute_orientation(self):
         """
@@ -485,14 +719,17 @@ class TwoArmPegInHole(TwoArmEnv):
         center = hole_pos + hole_mat @ np.array([0.1, 0, 0])
 
         t = (center - peg_pos) @ v / (np.linalg.norm(v) ** 2)
-        d = np.linalg.norm(np.cross(v, peg_pos - center)) / np.linalg.norm(v)
-
         hole_normal = hole_mat @ np.array([0, 0, 1])
+        d = np.linalg.norm(np.cross(hole_normal, peg_pos - center)) / np.linalg.norm(v) #v
+
+        
         return (
             t,
             d,
             abs(np.dot(hole_normal, v) / np.linalg.norm(hole_normal) / np.linalg.norm(v)),
         )
+    
+
 
     def _peg_pose_in_hole_frame(self):
         """
