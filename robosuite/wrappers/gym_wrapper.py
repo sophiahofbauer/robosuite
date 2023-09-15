@@ -1,19 +1,16 @@
 """
 This file implements a wrapper for facilitating compatibility with OpenAI gym.
-This is useful when using these environments with code that assumes a gym-like
+This is useful when using these environments with code that assumes a gym-like 
 interface.
 """
 
 import numpy as np
-import gymnasium as gym
-from gymnasium import spaces, Env
-
+from gym import spaces
+from gym.core import Env
 from robosuite.wrappers import Wrapper
 
 
-class GymWrapper(Wrapper, gym.Env):
-    metadata = None
-    render_mode = None
+class GymWrapper(Wrapper, Env):
     """
     Initializes the Gym wrapper. Mimics many of the required functionalities of the Wrapper class
     found in the gym.core module
@@ -22,7 +19,7 @@ class GymWrapper(Wrapper, gym.Env):
         env (MujocoEnv): The environment to wrap.
         keys (None or list of str): If provided, each observation will
             consist of concatenated keys from the wrapped environment's
-            observation dictionary. Defaults to proprio-state and object-state.
+            observation dictionary. Defaults to robot-state and object-state.
 
     Raises:
         AssertionError: [Object observations must be enabled if no keys]
@@ -48,22 +45,23 @@ class GymWrapper(Wrapper, gym.Env):
                 keys += [f"{cam_name}_image" for cam_name in self.env.camera_names]
             # Iterate over all robots to add to state
             for idx in range(len(self.env.robots)):
-                keys += ["robot{}_proprio-state".format(idx)]
+                keys += ["robot{}_robot-state".format(idx)]
         self.keys = keys
 
         # Gym specific attributes
         self.env.spec = None
+        self.metadata = None
 
         # set up observation and action spaces
         obs = self.env.reset()
-        self.modality_dims = {key: obs[key].shape for key in self.keys}
+        # self.modality_dims = {key: obs[key].shape for key in self.keys}
         flat_ob = self._flatten_obs(obs)
         self.obs_dim = flat_ob.size
         high = np.inf * np.ones(self.obs_dim)
         low = -high
-        self.observation_space = spaces.Box(low, high)
+        self.observation_space = spaces.Box(low=low, high=high)
         low, high = self.env.action_spec
-        self.action_space = spaces.Box(low, high)
+        self.action_space = spaces.Box(low=low, high=high)
 
     def _flatten_obs(self, obs_dict, verbose=False):
         """
@@ -84,22 +82,17 @@ class GymWrapper(Wrapper, gym.Env):
                 ob_lst.append(np.array(obs_dict[key]).flatten())
         return np.concatenate(ob_lst)
 
-    def reset(self, seed=None, options=None):
+    def reset(self):
         """
-        Extends env reset method to return flattened observation instead of normal OrderedDict and optionally resets seed
+        Extends env reset method to return flattened observation instead of normal OrderedDict.
 
         Returns:
             np.array: Flattened environment observation space after reset occurs
         """
-        if seed is not None:
-            if isinstance(seed, int):
-                np.random.seed(seed)
-            else:
-                raise TypeError("Seed must be an integer type!")
         ob_dict = self.env.reset()
-        return self._flatten_obs(ob_dict), {}
+        return self._flatten_obs(ob_dict)
 
-    def step(self, action):
+    def step(self, action_peg, action_hole, **kwargs):
         """
         Extends vanilla step() function call to return flattened observation instead of normal OrderedDict.
 
@@ -111,12 +104,28 @@ class GymWrapper(Wrapper, gym.Env):
 
                 - (np.array) flattened observations from the environment
                 - (float) reward from the environment
-                - (bool) episode ending after reaching an env terminal state
-                - (bool) episode ending after an externally defined condition
+                - (bool) whether the current episode is completed or not
                 - (dict) misc information
         """
-        ob_dict, reward, terminated, info = self.env.step(action)
-        return self._flatten_obs(ob_dict), reward, terminated, False, info
+        ob_dict, reward, done, info = self.env.step(action_peg, action_hole, **kwargs)
+        return self._flatten_obs(ob_dict), reward, done, info
+
+    def seed(self, seed=None):
+        """
+        Utility function to set numpy seed
+
+        Args:
+            seed (None or int): If specified, numpy seed to set
+
+        Raises:
+            TypeError: [Seed must be integer]
+        """
+        # Seed the generator
+        if seed is not None:
+            try:
+                np.random.seed(seed)
+            except:
+                TypeError("Seed must be an integer type!")
 
     def compute_reward(self, achieved_goal, desired_goal, info):
         """

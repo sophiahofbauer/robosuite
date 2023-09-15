@@ -62,6 +62,10 @@ class SingleArm(Manipulator):
         mount_type="default",
         gripper_type="default",
         control_freq=20,
+        #skill_controller=None,
+        #new 
+        skill_controller_peg=None,
+        skill_controller_hole=None,
     ):
 
         self.controller = None
@@ -85,6 +89,11 @@ class SingleArm(Manipulator):
         self.recent_ee_vel_buffer = None  # RingBuffer holding prior 10 values of velocity values
         self.recent_ee_acc = None  # Current and last eef acceleration
 
+        #self.skill_controller = skill_controller
+        #new 
+        self.skill_controller_peg = skill_controller_peg
+        self.skill_controller_hole = skill_controller_hole
+        
         super().__init__(
             robot_type=robot_type,
             idn=idn,

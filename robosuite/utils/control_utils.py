@@ -1,5 +1,4 @@
 import numpy as np
-
 import robosuite.utils.transform_utils as trans
 from robosuite.utils.numba import jit_decorator
 
@@ -33,7 +32,8 @@ def nullspace_torques(mass_matrix, nullspace_matrix, initial_joint, joint_pos, j
     joint_kv = np.sqrt(joint_kp) * 2
 
     # calculate desired torques based on gains and error
-    pose_torques = np.dot(mass_matrix, (joint_kp * (initial_joint - joint_pos) - joint_kv * joint_vel))
+    pose_torques = np.dot(mass_matrix, (joint_kp * (
+            initial_joint - joint_pos) - joint_kv * joint_vel))
 
     # map desired torques to null subspace within joint torque actuator space
     nullspace_torques = np.dot(nullspace_matrix.transpose(), pose_torques)
@@ -62,13 +62,19 @@ def opspace_matrices(mass_matrix, J_full, J_pos, J_ori):
     mass_matrix_inv = np.linalg.inv(mass_matrix)
 
     # J M^-1 J^T
-    lambda_full_inv = np.dot(np.dot(J_full, mass_matrix_inv), J_full.transpose())
+    lambda_full_inv = np.dot(
+        np.dot(J_full, mass_matrix_inv),
+        J_full.transpose())
 
     # Jx M^-1 Jx^T
-    lambda_pos_inv = np.dot(np.dot(J_pos, mass_matrix_inv), J_pos.transpose())
+    lambda_pos_inv = np.dot(
+        np.dot(J_pos, mass_matrix_inv),
+        J_pos.transpose())
 
     # Jr M^-1 Jr^T
-    lambda_ori_inv = np.dot(np.dot(J_ori, mass_matrix_inv), J_ori.transpose())
+    lambda_ori_inv = np.dot(
+        np.dot(J_ori, mass_matrix_inv),
+        J_ori.transpose())
 
     # take the inverses, but zero out small singular values for stability
     lambda_full = np.linalg.pinv(lambda_full_inv)
@@ -111,7 +117,10 @@ def orientation_error(desired, current):
     return error
 
 
-def set_goal_position(delta, current_position, position_limit=None, set_pos=None):
+def set_goal_position(delta,
+                      current_position,
+                      position_limit=None,
+                      set_pos=None):
     """
     Calculates and returns the desired goal position, clipping the result accordingly to @position_limits.
     @delta and @current_position must be specified if a relative goal is requested, else @set_pos must be
@@ -136,10 +145,9 @@ def set_goal_position(delta, current_position, position_limit=None, set_pos=None
         goal_position = current_position + delta
 
     if position_limit is not None:
-        if position_limit.shape != (2, n):
-            raise ValueError(
-                "Position limit should be shaped (2,{}) " "but is instead: {}".format(n, position_limit.shape)
-            )
+        if position_limit.shape != (2,n):
+            raise ValueError("Position limit should be shaped (2,{}) "
+                             "but is instead: {}".format(n, position_limit.shape))
 
         # Clip goal position
         goal_position = np.clip(goal_position, position_limit[0], position_limit[1])
@@ -147,7 +155,10 @@ def set_goal_position(delta, current_position, position_limit=None, set_pos=None
     return goal_position
 
 
-def set_goal_orientation(delta, current_orientation, orientation_limit=None, set_ori=None):
+def set_goal_orientation(delta,
+                         current_orientation,
+                         orientation_limit=None,
+                         set_ori=None):
     """
     Calculates and returns the desired goal orientation, clipping the result accordingly to @orientation_limits.
     @delta and @current_orientation must be specified if a relative goal is requested, else @set_ori must be
@@ -174,63 +185,181 @@ def set_goal_orientation(delta, current_orientation, orientation_limit=None, set
         # convert axis-angle value to rotation matrix
         quat_error = trans.axisangle2quat(delta)
         rotation_mat_error = trans.quat2mat(quat_error)
-        goal_orientation = np.dot(rotation_mat_error, current_orientation)
+        goal_orientation = np.dot(rotation_mat_error.T, current_orientation)
 
     # check for orientation limits
     if np.array(orientation_limit).any():
-        if orientation_limit.shape != (2, 3):
-            raise ValueError(
-                "Orientation limit should be shaped (2,3) " "but is instead: {}".format(orientation_limit.shape)
-            )
+        if orientation_limit.shape != (2,3):
+            raise ValueError("Orientation limit should be shaped (2,3) "
+                             "but is instead: {}".format(orientation_limit.shape))
 
         # Convert to euler angles for clipping
-        euler = trans.mat2euler(goal_orientation)
+        euler = trans.mat2euler(goal_orientation, axes="rxyz")
 
         # Clip euler angles according to specified limits
         limited = False
         for idx in range(3):
+            out_of_bounds = True
             if orientation_limit[0][idx] < orientation_limit[1][idx]:  # Normal angle sector meaning
                 if orientation_limit[0][idx] < euler[idx] < orientation_limit[1][idx]:
-                    continue
-                else:
-                    limited = True
-                    dist_to_lower = euler[idx] - orientation_limit[0][idx]
-                    if dist_to_lower > np.pi:
-                        dist_to_lower -= 2 * np.pi
-                    elif dist_to_lower < -np.pi:
-                        dist_to_lower += 2 * np.pi
-
-                    dist_to_higher = euler[idx] - orientation_limit[1][idx]
-                    if dist_to_lower > np.pi:
-                        dist_to_higher -= 2 * np.pi
-                    elif dist_to_lower < -np.pi:
-                        dist_to_higher += 2 * np.pi
-
-                    if dist_to_lower < dist_to_higher:
-                        euler[idx] = orientation_limit[0][idx]
-                    else:
-                        euler[idx] = orientation_limit[1][idx]
+                    out_of_bounds = False
             else:  # Inverted angle sector meaning
-                if orientation_limit[0][idx] < euler[idx] or euler[idx] < orientation_limit[1][idx]:
-                    continue
+                if (orientation_limit[0][idx] < euler[idx]
+                        or euler[idx] < orientation_limit[1][idx]):
+                    out_of_bounds = False
+
+            if out_of_bounds:
+                limited = True
+                dist_to_lower = euler[idx] - orientation_limit[0][idx]
+                if dist_to_lower > np.pi:
+                    dist_to_lower -= 2 * np.pi
+                elif dist_to_lower < -np.pi:
+                    dist_to_lower += 2 * np.pi
+
+                dist_to_higher = euler[idx] - orientation_limit[1][idx]
+                if dist_to_lower > np.pi:
+                    dist_to_higher -= 2 * np.pi
+                elif dist_to_lower < -np.pi:
+                    dist_to_higher += 2 * np.pi
+
+                if np.abs(dist_to_lower) < np.abs(dist_to_higher):
+                    euler[idx] = orientation_limit[0][idx]
                 else:
-                    limited = True
-                    dist_to_lower = euler[idx] - orientation_limit[0][idx]
-                    if dist_to_lower > np.pi:
-                        dist_to_lower -= 2 * np.pi
-                    elif dist_to_lower < -np.pi:
-                        dist_to_lower += 2 * np.pi
-
-                    dist_to_higher = euler[idx] - orientation_limit[1][idx]
-                    if dist_to_lower > np.pi:
-                        dist_to_higher -= 2 * np.pi
-                    elif dist_to_lower < -np.pi:
-                        dist_to_higher += 2 * np.pi
-
-                    if dist_to_lower < dist_to_higher:
-                        euler[idx] = orientation_limit[0][idx]
-                    else:
-                        euler[idx] = orientation_limit[1][idx]
+                    euler[idx] = orientation_limit[1][idx]
         if limited:
             goal_orientation = trans.euler2mat(np.array([euler[0], euler[1], euler[2]]))
     return goal_orientation
+
+
+class Buffer(object):
+    """
+    Abstract class for different kinds of data buffers. Minimum API should have a "push" and "clear" method
+    """
+
+    def push(self, value):
+        """
+        Pushes a new @value to the buffer
+
+        Args:
+            value: Value to push to the buffer
+        """
+        raise NotImplementedError
+
+    def clear(self):
+        raise NotImplementedError
+
+
+class RingBuffer(Buffer):
+    """
+    Simple RingBuffer object to hold values to average (useful for, e.g.: filtering D component in PID control)
+
+    Note that the buffer object is a 2D numpy array, where each row corresponds to
+    individual entries into the buffer
+
+    Args:
+        dim (int): Size of entries being added. This is, e.g.: the size of a state vector that is to be stored
+        length (int): Size of the ring buffer
+    """
+
+    def __init__(self, dim, length):
+        # Store input args
+        self.dim = dim
+        self.length = length
+
+        # Variable so that initial average values are accurate
+        self._size = 0
+
+        # Save pointer to current place in the buffer
+        self.ptr = 0
+
+        # Construct ring buffer
+        self.buf = np.zeros((length, dim))
+
+    def push(self, value):
+        """
+        Pushes a new value into the buffer
+
+        Args:
+            value (int or float or array): Value(s) to push into the array (taken as a single new element)
+        """
+        # Add value, then increment pointer (and size if necessary)
+        self.buf[self.ptr] = np.array(value)
+        self.ptr = (self.ptr + 1) % self.length
+        if self._size < self.length:
+            self._size += 1
+
+    def clear(self):
+        """
+        Clears buffer and reset pointer
+        """
+        self.buf = np.zeros((self.length, self.dim))
+        self.ptr = 0
+        self._size = 0
+
+    @property
+    def average(self):
+        """
+        Gets the average of components in buffer
+
+        Returns:
+            float or np.array: Averaged value of all elements in buffer
+        """
+        return np.mean(self.buf[:self._size], axis=0)
+
+
+class DeltaBuffer(Buffer):
+    """
+    Simple 2-length buffer object to streamline grabbing delta values between "current" and "last" values
+
+    Constructs delta object.
+
+    Args:
+        dim (int): Size of numerical arrays being inputted
+        init_value (None or Iterable): Initial value to fill "last" value with initially.
+            If None (default), last array will be filled with zeros
+    """
+    def __init__(self, dim, init_value=None):
+        # Setup delta object
+        self.dim = dim
+        self.last = np.zeros(self.dim) if init_value is None else np.array(init_value)
+        self.current = np.zeros(self.dim)
+
+    def push(self, value):
+        """
+        Pushes a new value into the buffer; current becomes last and @value becomes current
+
+        Args:
+            value (int or float or array): Value(s) to push into the array (taken as a single new element)
+        """
+        self.last = self.current
+        self.current = np.array(value)
+
+    def clear(self):
+        """
+        Clears last and current value
+        """
+        self.last, self.current = np.zeros(self.dim), np.zeros(self.dim)
+
+    @property
+    def delta(self, abs_value=False):
+        """
+        Returns the delta between last value and current value. If abs_value is set to True, then returns
+        the absolute value between the values
+
+        Args:
+            abs_value (bool): Whether to return absolute value or not
+
+        Returns:
+            float or np.array: difference between current and last value
+        """
+        return self.current - self.last if not abs_value else np.abs(self.current - self.last)
+
+    @property
+    def average(self):
+        """
+        Returns the average between the current and last value
+
+        Returns:
+            float or np.array: Averaged value of all elements in buffer
+        """
+        return (self.current + self.last) / 2.0
